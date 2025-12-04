@@ -24,6 +24,10 @@ class SettingsManager:
                     "region": {"x": 0, "y": 0, "width": 100, "height": 100},
                     "detection_mode": "continuous",
                     "motion_threshold": 0.01,
+                    "motion_min_threshold": 0.003,
+                    "motion_adaptive_scale": 3.0,
+                    "motion_hold_seconds": 2.5,
+                    "motion_noise_ema": 0.1,
                 },
             ],
             "storage": {"events_db": "data/events.db"},
@@ -70,6 +74,10 @@ class SettingsManager:
             "region": {"x": 0, "y": 0, "width": 100, "height": 100},
             "detection_mode": "continuous",
             "motion_threshold": 0.01,
+            "motion_min_threshold": 0.003,
+            "motion_adaptive_scale": 3.0,
+            "motion_hold_seconds": 2.5,
+            "motion_noise_ema": 0.1,
         }
 
     def _fill_channel_defaults(self, channel: Dict[str, Any], tracking_defaults: Dict[str, Any]) -> bool:

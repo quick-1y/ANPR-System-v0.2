@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
@@ -29,7 +30,13 @@ class ChannelWorker(QtCore.QThread):
         self.min_confidence = float(channel_conf.get("ocr_min_confidence", 0.6))
         self.detection_mode = channel_conf.get("detection_mode", "continuous")
         self.motion_threshold = float(channel_conf.get("motion_threshold", 0.01))
+        self.motion_min_threshold = float(channel_conf.get("motion_min_threshold", 0.003))
+        self.motion_adaptive_scale = float(channel_conf.get("motion_adaptive_scale", 3.0))
+        self.motion_hold_seconds = float(channel_conf.get("motion_hold_seconds", 2.5))
+        self.motion_noise_ema = float(channel_conf.get("motion_noise_ema", 0.1))
         self._prev_motion_frame: Optional[cv2.Mat] = None
+        self._noise_floor = 0.0
+        self._last_motion_ts: Optional[float] = None
 
     def _open_capture(self, source: str) -> Optional[cv2.VideoCapture]:
         capture = cv2.VideoCapture(int(source) if source.isnumeric() else source)
@@ -90,7 +97,14 @@ class ChannelWorker(QtCore.QThread):
 
         _, thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)
         motion_ratio = cv2.countNonZero(thresh) / float(gray.size)
-        return motion_ratio > self.motion_threshold
+
+        self._noise_floor = (1 - self.motion_noise_ema) * self._noise_floor + self.motion_noise_ema * motion_ratio
+        adaptive_threshold = max(
+            self.motion_min_threshold,
+            self.motion_threshold,
+            self._noise_floor * self.motion_adaptive_scale,
+        )
+        return motion_ratio > adaptive_threshold
 
     @staticmethod
     def _offset_detections(detections: list[dict], roi_rect: Tuple[int, int, int, int]) -> list[dict]:
@@ -163,13 +177,20 @@ class ChannelWorker(QtCore.QThread):
 
             roi_frame, roi_rect = self._extract_region(frame)
             motion_detected = self._motion_detected(roi_frame)
+            now_ts = time.monotonic()
+            if motion_detected:
+                self._last_motion_ts = now_ts
 
-            if not motion_detected:
-                if not waiting_for_motion and self.detection_mode == "motion":
+            motion_active = motion_detected
+            if self.detection_mode == "motion" and not motion_active and self._last_motion_ts:
+                motion_active = (now_ts - self._last_motion_ts) < self.motion_hold_seconds
+
+            if not motion_active and self.detection_mode == "motion":
+                if not waiting_for_motion:
                     self.status_ready.emit(channel_name, "Ожидание движения")
                 waiting_for_motion = True
             else:
-                if waiting_for_motion:
+                if waiting_for_motion and motion_active:
                     self.status_ready.emit(channel_name, "Движение обнаружено")
                 waiting_for_motion = False
                 detections = await asyncio.to_thread(detector.track, roi_frame)
