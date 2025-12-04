@@ -329,7 +329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         label = self.channel_labels.get(channel)
         if label:
             normalized = status.lower()
-            if "движен" in normalized:
+            if "движ" in normalized or "motion" in normalized:
                 label.set_status("")
             else:
                 label.set_status(status)
