@@ -328,11 +328,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_status(self, channel: str, status: str) -> None:
         label = self.channel_labels.get(channel)
         if label:
-            if "движение" in status.lower():
+            normalized = status.lower()
+            if "движен" in normalized:
                 label.set_status("")
             else:
                 label.set_status(status)
-            label.set_motion_active("обнаружено" in status.lower())
+            label.set_motion_active("обнаружено" in normalized)
 
     # ------------------ События ------------------
     def _build_events_tab(self) -> QtWidgets.QWidget:
