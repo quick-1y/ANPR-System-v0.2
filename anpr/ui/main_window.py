@@ -122,17 +122,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_channels(self) -> None:
         self._stop_workers()
         self.channel_workers = []
-        best_shots = self.settings.get_best_shots()
-        cooldown = self.settings.get_cooldown_seconds()
-        min_confidence = self.settings.get_min_confidence()
         for channel_conf in self.settings.get_channels():
-            worker = ChannelWorker(
-                channel_conf,
-                self.settings.get_db_path(),
-                best_shots,
-                cooldown,
-                min_confidence,
-            )
+            worker = ChannelWorker(channel_conf, self.settings.get_db_path())
             worker.frame_ready.connect(self._update_frame)
             worker.event_ready.connect(self._handle_event)
             worker.status_ready.connect(self._handle_status)
@@ -285,31 +276,56 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.channels_list)
 
         form_layout = QtWidgets.QFormLayout()
-        self.best_shots_input = QtWidgets.QSpinBox()
-        self.best_shots_input.setRange(1, 50)
-        self.best_shots_input.setValue(self.settings.get_best_shots())
-        self.best_shots_input.setToolTip("Количество бестшотов, участвующих в консенсусе трека")
-        form_layout.addRow("Бестшоты на трек:", self.best_shots_input)
-        self.cooldown_input = QtWidgets.QSpinBox()
-        self.cooldown_input.setRange(0, 3600)
-        self.cooldown_input.setValue(self.settings.get_cooldown_seconds())
-        self.cooldown_input.setToolTip(
-            "Интервал (в секундах), в течение которого не создается повторное событие для того же номера"
-        )
-        form_layout.addRow("Пауза повтора (сек):", self.cooldown_input)
-        self.min_conf_input = QtWidgets.QDoubleSpinBox()
-        self.min_conf_input.setRange(0.0, 1.0)
-        self.min_conf_input.setSingleStep(0.05)
-        self.min_conf_input.setDecimals(2)
-        self.min_conf_input.setValue(self.settings.get_min_confidence())
-        self.min_conf_input.setToolTip(
-            "Минимальная уверенность OCR (0-1) для приема результата; ниже — помечается как нечитаемое"
-        )
-        form_layout.addRow("Мин. уверенность OCR:", self.min_conf_input)
         self.channel_name_input = QtWidgets.QLineEdit()
         self.channel_source_input = QtWidgets.QLineEdit()
         form_layout.addRow("Название:", self.channel_name_input)
         form_layout.addRow("Источник/RTSP:", self.channel_source_input)
+
+        self.best_shots_input = QtWidgets.QSpinBox()
+        self.best_shots_input.setRange(1, 50)
+        self.best_shots_input.setToolTip("Количество бестшотов, участвующих в консенсусе трека")
+        form_layout.addRow("Бестшоты на трек:", self.best_shots_input)
+
+        self.cooldown_input = QtWidgets.QSpinBox()
+        self.cooldown_input.setRange(0, 3600)
+        self.cooldown_input.setToolTip(
+            "Интервал (в секундах), в течение которого не создается повторное событие для того же номера"
+        )
+        form_layout.addRow("Пауза повтора (сек):", self.cooldown_input)
+
+        self.min_conf_input = QtWidgets.QDoubleSpinBox()
+        self.min_conf_input.setRange(0.0, 1.0)
+        self.min_conf_input.setSingleStep(0.05)
+        self.min_conf_input.setDecimals(2)
+        self.min_conf_input.setToolTip(
+            "Минимальная уверенность OCR (0-1) для приема результата; ниже — помечается как нечитаемое"
+        )
+        form_layout.addRow("Мин. уверенность OCR:", self.min_conf_input)
+
+        self.detection_mode_input = QtWidgets.QComboBox()
+        self.detection_mode_input.addItem("Постоянное", "continuous")
+        self.detection_mode_input.addItem("Детектор движения", "motion")
+        form_layout.addRow("Обнаружение ТС:", self.detection_mode_input)
+
+        roi_layout = QtWidgets.QGridLayout()
+        self.roi_x_input = QtWidgets.QSpinBox()
+        self.roi_x_input.setRange(0, 100)
+        self.roi_y_input = QtWidgets.QSpinBox()
+        self.roi_y_input.setRange(0, 100)
+        self.roi_w_input = QtWidgets.QSpinBox()
+        self.roi_w_input.setRange(1, 100)
+        self.roi_h_input = QtWidgets.QSpinBox()
+        self.roi_h_input.setRange(1, 100)
+
+        roi_layout.addWidget(QtWidgets.QLabel("X (%):"), 0, 0)
+        roi_layout.addWidget(self.roi_x_input, 0, 1)
+        roi_layout.addWidget(QtWidgets.QLabel("Y (%):"), 1, 0)
+        roi_layout.addWidget(self.roi_y_input, 1, 1)
+        roi_layout.addWidget(QtWidgets.QLabel("Ширина (%):"), 2, 0)
+        roi_layout.addWidget(self.roi_w_input, 2, 1)
+        roi_layout.addWidget(QtWidgets.QLabel("Высота (%):"), 3, 0)
+        roi_layout.addWidget(self.roi_h_input, 3, 1)
+        form_layout.addRow("Область распознавания:", roi_layout)
 
         buttons_layout = QtWidgets.QHBoxLayout()
         add_btn = QtWidgets.QPushButton("Добавить")
@@ -341,11 +357,36 @@ class MainWindow(QtWidgets.QMainWindow):
             channel = channels[index]
             self.channel_name_input.setText(channel.get("name", ""))
             self.channel_source_input.setText(channel.get("source", ""))
+            self.best_shots_input.setValue(int(channel.get("best_shots", 3)))
+            self.cooldown_input.setValue(int(channel.get("cooldown_seconds", 5)))
+            self.min_conf_input.setValue(float(channel.get("ocr_min_confidence", 0.6)))
+
+            mode = channel.get("detection_mode", "continuous")
+            mode_index = max(0, self.detection_mode_input.findData(mode))
+            self.detection_mode_input.setCurrentIndex(mode_index)
+
+            region = channel.get("region", {})
+            self.roi_x_input.setValue(int(region.get("x", 0)))
+            self.roi_y_input.setValue(int(region.get("y", 0)))
+            self.roi_w_input.setValue(int(region.get("width", 100)))
+            self.roi_h_input.setValue(int(region.get("height", 100)))
 
     def _add_channel(self) -> None:
         channels = self.settings.get_channels()
         new_id = max([c.get("id", 0) for c in channels] + [0]) + 1
-        channels.append({"id": new_id, "name": f"Канал {new_id}", "source": ""})
+        channels.append(
+            {
+                "id": new_id,
+                "name": f"Канал {new_id}",
+                "source": "",
+                "best_shots": self.settings.get_best_shots(),
+                "cooldown_seconds": self.settings.get_cooldown_seconds(),
+                "ocr_min_confidence": self.settings.get_min_confidence(),
+                "region": {"x": 0, "y": 0, "width": 100, "height": 100},
+                "detection_mode": "continuous",
+                "motion_threshold": 0.01,
+            }
+        )
         self.settings.save_channels(channels)
         self._reload_channels_list()
         self._draw_grid()
@@ -360,14 +401,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._draw_grid()
 
     def _save_channel(self) -> None:
-        self.settings.save_best_shots(self.best_shots_input.value())
-        self.settings.save_cooldown_seconds(self.cooldown_input.value())
-        self.settings.save_min_confidence(self.min_conf_input.value())
         index = self.channels_list.currentRow()
         channels = self.settings.get_channels()
         if 0 <= index < len(channels):
             channels[index]["name"] = self.channel_name_input.text()
             channels[index]["source"] = self.channel_source_input.text()
+            channels[index]["best_shots"] = int(self.best_shots_input.value())
+            channels[index]["cooldown_seconds"] = int(self.cooldown_input.value())
+            channels[index]["ocr_min_confidence"] = float(self.min_conf_input.value())
+            channels[index]["detection_mode"] = self.detection_mode_input.currentData()
+
+            region = {
+                "x": int(self.roi_x_input.value()),
+                "y": int(self.roi_y_input.value()),
+                "width": int(self.roi_w_input.value()),
+                "height": int(self.roi_h_input.value()),
+            }
+            # Корректируем область, чтобы она не выходила за пределы кадра.
+            region["width"] = min(region["width"], max(1, 100 - region["x"]))
+            region["height"] = min(region["height"], max(1, 100 - region["y"]))
+            channels[index]["region"] = region
             self.settings.save_channels(channels)
             self._reload_channels_list()
             self._draw_grid()
