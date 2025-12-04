@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional
+import cv2
+from typing import Dict, List, Optional, Tuple
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -8,6 +9,183 @@ from settings_manager import SettingsManager
 from storage import EventDatabase
 
 logger = get_logger(__name__)
+
+
+class ChannelView(QtWidgets.QWidget):
+    """Отображает поток канала с подсказками и индикатором движения."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.name = name
+
+        self.video_label = QtWidgets.QLabel("Нет сигнала")
+        self.video_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.video_label.setStyleSheet(
+            "background-color: #1c1c1c; color: #ccc; border: 1px solid #444; padding: 4px;"
+        )
+        self.video_label.setMinimumSize(220, 170)
+        self.video_label.setScaledContents(False)
+        self.video_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.video_label)
+
+        self.motion_indicator = QtWidgets.QLabel("Движение")
+        self.motion_indicator.setParent(self.video_label)
+        self.motion_indicator.setStyleSheet(
+            "background-color: rgba(220, 53, 69, 0.85); color: white;"
+            "padding: 3px 6px; border-radius: 6px; font-weight: bold;"
+        )
+        self.motion_indicator.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.motion_indicator.hide()
+
+        self.status_hint = QtWidgets.QLabel("")
+        self.status_hint.setParent(self.video_label)
+        self.status_hint.setStyleSheet(
+            "background-color: rgba(0, 0, 0, 0.55); color: #ddd; padding: 2px 4px;"
+        )
+        self.status_hint.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        rect = self.video_label.contentsRect()
+        margin = 8
+        indicator_size = self.motion_indicator.sizeHint()
+        self.motion_indicator.move(
+            rect.right() - indicator_size.width() - margin, rect.top() + margin
+        )
+        status_size = self.status_hint.sizeHint()
+        self.status_hint.move(rect.left() + margin, rect.bottom() - status_size.height() - margin)
+
+    def set_pixmap(self, pixmap: QtGui.QPixmap) -> None:
+        self.video_label.setPixmap(pixmap)
+
+    def set_motion_active(self, active: bool) -> None:
+        self.motion_indicator.setVisible(active)
+
+    def set_status(self, text: str) -> None:
+        self.status_hint.setText(text)
+        self.status_hint.adjustSize()
+
+
+class ROIEditor(QtWidgets.QLabel):
+    """Виджет предпросмотра канала с настраиваемой областью распознавания."""
+
+    roi_changed = QtCore.pyqtSignal(dict)
+
+    def __init__(self) -> None:
+        super().__init__("Нет кадра")
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setMinimumSize(400, 260)
+        self.setStyleSheet(
+            "background-color: #111; color: #888; border: 1px solid #444; padding: 6px;"
+        )
+        self._roi = {"x": 0, "y": 0, "width": 100, "height": 100}
+        self._pixmap: Optional[QtGui.QPixmap] = None
+        self._rubber_band = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Rectangle, self)
+        self._origin: Optional[QtCore.QPoint] = None
+
+    def set_roi(self, roi: Dict[str, int]) -> None:
+        self._roi = {
+            "x": int(roi.get("x", 0)),
+            "y": int(roi.get("y", 0)),
+            "width": int(roi.get("width", 100)),
+            "height": int(roi.get("height", 100)),
+        }
+        self._roi["width"] = min(self._roi["width"], max(1, 100 - self._roi["x"]))
+        self._roi["height"] = min(self._roi["height"], max(1, 100 - self._roi["y"]))
+        self.update()
+
+    def setPixmap(self, pixmap: Optional[QtGui.QPixmap]) -> None:  # noqa: N802
+        self._pixmap = pixmap
+        if pixmap is None:
+            super().setPixmap(QtGui.QPixmap())
+            self.setText("Нет кадра")
+            return
+        scaled = self._scaled_pixmap(self.size())
+        super().setPixmap(scaled)
+        self.setText("")
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._pixmap:
+            super().setPixmap(self._scaled_pixmap(event.size()))
+
+    def _scaled_pixmap(self, size: QtCore.QSize) -> QtGui.QPixmap:
+        assert self._pixmap is not None
+        return self._pixmap.scaled(
+            size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        )
+
+    def _image_geometry(self) -> Optional[Tuple[QtCore.QPoint, QtCore.QSize]]:
+        if self._pixmap is None:
+            return None
+        pixmap = self._scaled_pixmap(self.size())
+        area = self.contentsRect()
+        x = area.x() + (area.width() - pixmap.width()) // 2
+        y = area.y() + (area.height() - pixmap.height()) // 2
+        return QtCore.QPoint(x, y), pixmap.size()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        super().paintEvent(event)
+        geom = self._image_geometry()
+        if geom is None:
+            return
+        offset, size = geom
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        roi_rect = QtCore.QRect(
+            offset.x() + int(size.width() * self._roi["x"] / 100),
+            offset.y() + int(size.height() * self._roi["y"] / 100),
+            int(size.width() * self._roi["width"] / 100),
+            int(size.height() * self._roi["height"] / 100),
+        )
+        pen = QtGui.QPen(QtGui.QColor(0, 200, 0))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor(0, 200, 0, 40))
+        painter.drawRect(roi_rect)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        geom = self._image_geometry()
+        if geom is None:
+            return
+        offset, size = geom
+        area_rect = QtCore.QRect(offset, size)
+        if not area_rect.contains(event.pos()):
+            return
+        self._origin = event.pos()
+        self._rubber_band.setGeometry(QtCore.QRect(self._origin, QtCore.QSize()))
+        self._rubber_band.show()
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if self._origin is None:
+            return
+        rect = QtCore.QRect(self._origin, event.pos()).normalized()
+        self._rubber_band.setGeometry(rect)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if self._origin is None:
+            return
+        geom = self._image_geometry()
+        self._rubber_band.hide()
+        if geom is None:
+            self._origin = None
+            return
+        offset, size = geom
+        selection = self._rubber_band.geometry().intersected(QtCore.QRect(offset, size))
+        if selection.isValid() and selection.width() > 5 and selection.height() > 5:
+            x_pct = max(0, min(100, int((selection.left() - offset.x()) * 100 / size.width())))
+            y_pct = max(0, min(100, int((selection.top() - offset.y()) * 100 / size.height())))
+            w_pct = max(1, min(100 - x_pct, int(selection.width() * 100 / size.width())))
+            h_pct = max(1, min(100 - y_pct, int(selection.height() * 100 / size.height())))
+            self._roi = {"x": x_pct, "y": y_pct, "width": w_pct, "height": h_pct}
+            self.roi_changed.emit(self._roi)
+        self._origin = None
+        self.update()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -24,7 +202,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.db = EventDatabase(self.settings.get_db_path())
 
         self.channel_workers: List[ChannelWorker] = []
-        self.channel_labels: Dict[str, QtWidgets.QLabel] = {}
+        self.channel_labels: Dict[str, ChannelView] = {}
 
         self.tabs = QtWidgets.QTabWidget()
         self.monitor_tab = self._build_monitor_tab()
@@ -100,17 +278,9 @@ class MainWindow(QtWidgets.QMainWindow):
         index = 0
         for row in range(rows):
             for col in range(cols):
-                label = QtWidgets.QLabel("Нет сигнала")
-                label.setAlignment(QtCore.Qt.AlignCenter)
-                label.setStyleSheet(
-                    "background-color: #1c1c1c; color: #ccc; border: 1px solid #444; padding: 4px;"
-                )
-                label.setMinimumSize(220, 170)
-                label.setScaledContents(False)
-                label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+                label = ChannelView(f"Канал {index+1}")
                 if index < len(channels):
                     channel_name = channels[index].get("name", f"Канал {index+1}")
-                    label.setText(channel_name)
                     self.channel_labels[channel_name] = label
                 self.grid_layout.addWidget(label, row, col)
                 index += 1
@@ -140,11 +310,11 @@ class MainWindow(QtWidgets.QMainWindow):
         label = self.channel_labels.get(channel_name)
         if not label:
             return
-        target_size = label.contentsRect().size()
+        target_size = label.video_label.contentsRect().size()
         pixmap = QtGui.QPixmap.fromImage(image).scaled(
             target_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
         )
-        label.setPixmap(pixmap)
+        label.set_pixmap(pixmap)
 
     def _handle_event(self, event: Dict) -> None:
         self.last_event_label.setText(
@@ -155,7 +325,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_status(self, channel: str, status: str) -> None:
         label = self.channel_labels.get(channel)
         if label:
-            label.setText(f"{channel}: {status}")
+            label.set_status(status)
+            label.set_motion_active("обнаружено" in status.lower())
 
     # ------------------ События ------------------
     def _build_events_tab(self) -> QtWidgets.QWidget:
@@ -271,9 +442,27 @@ class MainWindow(QtWidgets.QMainWindow):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(widget)
 
+        left_panel = QtWidgets.QVBoxLayout()
+        left_panel.setSpacing(6)
         self.channels_list = QtWidgets.QListWidget()
+        self.channels_list.setFixedWidth(180)
         self.channels_list.currentRowChanged.connect(self._load_channel_form)
-        layout.addWidget(self.channels_list)
+        left_panel.addWidget(self.channels_list)
+
+        list_buttons = QtWidgets.QHBoxLayout()
+        add_btn = QtWidgets.QPushButton("Добавить")
+        add_btn.clicked.connect(self._add_channel)
+        remove_btn = QtWidgets.QPushButton("Удалить")
+        remove_btn.clicked.connect(self._remove_channel)
+        list_buttons.addWidget(add_btn)
+        list_buttons.addWidget(remove_btn)
+        left_panel.addLayout(list_buttons)
+        layout.addLayout(left_panel)
+
+        form_container = QtWidgets.QVBoxLayout()
+        self.preview = ROIEditor()
+        self.preview.roi_changed.connect(self._on_roi_drawn)
+        form_container.addWidget(self.preview)
 
         form_layout = QtWidgets.QFormLayout()
         self.channel_name_input = QtWidgets.QLineEdit()
@@ -317,6 +506,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.roi_h_input = QtWidgets.QSpinBox()
         self.roi_h_input.setRange(1, 100)
 
+        for spin in (self.roi_x_input, self.roi_y_input, self.roi_w_input, self.roi_h_input):
+            spin.valueChanged.connect(self._on_roi_inputs_changed)
+
         roi_layout.addWidget(QtWidgets.QLabel("X (%):"), 0, 0)
         roi_layout.addWidget(self.roi_x_input, 0, 1)
         roi_layout.addWidget(QtWidgets.QLabel("Y (%):"), 1, 0)
@@ -327,19 +519,16 @@ class MainWindow(QtWidgets.QMainWindow):
         roi_layout.addWidget(self.roi_h_input, 3, 1)
         form_layout.addRow("Область распознавания:", roi_layout)
 
-        buttons_layout = QtWidgets.QHBoxLayout()
-        add_btn = QtWidgets.QPushButton("Добавить")
-        add_btn.clicked.connect(self._add_channel)
-        remove_btn = QtWidgets.QPushButton("Удалить")
-        remove_btn.clicked.connect(self._remove_channel)
+        refresh_btn = QtWidgets.QPushButton("Обновить кадр")
+        refresh_btn.clicked.connect(self._refresh_preview_frame)
+        form_layout.addRow(refresh_btn)
+
         save_btn = QtWidgets.QPushButton("Сохранить")
         save_btn.clicked.connect(self._save_channel)
-        buttons_layout.addWidget(add_btn)
-        buttons_layout.addWidget(remove_btn)
-        buttons_layout.addWidget(save_btn)
+        form_layout.addRow(save_btn)
 
-        form_layout.addRow(buttons_layout)
-        layout.addLayout(form_layout)
+        form_container.addLayout(form_layout)
+        layout.addLayout(form_container)
 
         self._reload_channels_list()
         return widget
@@ -370,6 +559,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.roi_y_input.setValue(int(region.get("y", 0)))
             self.roi_w_input.setValue(int(region.get("width", 100)))
             self.roi_h_input.setValue(int(region.get("height", 100)))
+            self.preview.set_roi(
+                {
+                    "x": int(region.get("x", 0)),
+                    "y": int(region.get("y", 0)),
+                    "width": int(region.get("width", 100)),
+                    "height": int(region.get("height", 100)),
+                }
+            )
+            self._refresh_preview_frame()
 
     def _add_channel(self) -> None:
         channels = self.settings.get_channels()
@@ -424,6 +622,54 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.save_channels(channels)
             self._reload_channels_list()
             self._draw_grid()
+
+    def _on_roi_drawn(self, roi: Dict[str, int]) -> None:
+        self.roi_x_input.blockSignals(True)
+        self.roi_y_input.blockSignals(True)
+        self.roi_w_input.blockSignals(True)
+        self.roi_h_input.blockSignals(True)
+        self.roi_x_input.setValue(roi["x"])
+        self.roi_y_input.setValue(roi["y"])
+        self.roi_w_input.setValue(roi["width"])
+        self.roi_h_input.setValue(roi["height"])
+        self.roi_x_input.blockSignals(False)
+        self.roi_y_input.blockSignals(False)
+        self.roi_w_input.blockSignals(False)
+        self.roi_h_input.blockSignals(False)
+
+    def _on_roi_inputs_changed(self) -> None:
+        roi = {
+            "x": int(self.roi_x_input.value()),
+            "y": int(self.roi_y_input.value()),
+            "width": int(self.roi_w_input.value()),
+            "height": int(self.roi_h_input.value()),
+        }
+        roi["width"] = min(roi["width"], max(1, 100 - roi["x"]))
+        roi["height"] = min(roi["height"], max(1, 100 - roi["y"]))
+        self.preview.set_roi(roi)
+
+    def _refresh_preview_frame(self) -> None:
+        index = self.channels_list.currentRow()
+        channels = self.settings.get_channels()
+        if not (0 <= index < len(channels)):
+            return
+        source = str(channels[index].get("source", ""))
+        if not source:
+            self.preview.setPixmap(None)
+            return
+        capture = cv2.VideoCapture(int(source) if source.isnumeric() else source)
+        ret, frame = capture.read()
+        capture.release()
+        if not ret or frame is None:
+            self.preview.setPixmap(None)
+            return
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, _ = rgb_frame.shape
+        bytes_per_line = 3 * width
+        q_image = QtGui.QImage(
+            rgb_frame.data, width, height, bytes_per_line, QtGui.QImage.Format_RGB888
+        ).copy()
+        self.preview.setPixmap(QtGui.QPixmap.fromImage(q_image))
 
     # ------------------ Жизненный цикл ------------------
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802

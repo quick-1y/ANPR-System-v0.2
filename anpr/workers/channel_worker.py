@@ -167,7 +167,7 @@ class ChannelWorker(QtCore.QThread):
             if not motion_detected:
                 if not waiting_for_motion and self.detection_mode == "motion":
                     self.status_ready.emit(channel_name, "Ожидание движения")
-                    waiting_for_motion = True
+                waiting_for_motion = True
             else:
                 if waiting_for_motion:
                     self.status_ready.emit(channel_name, "Движение обнаружено")
@@ -177,7 +177,9 @@ class ChannelWorker(QtCore.QThread):
                 results = await asyncio.to_thread(pipeline.process_frame, frame, detections)
                 await self._process_events(storage, source, results, channel_name)
 
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            display_frame = frame.copy()
+            cv2.rectangle(display_frame, (roi_rect[0], roi_rect[1]), (roi_rect[2], roi_rect[3]), (0, 200, 0), 2)
+            rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
             height, width, channel = rgb_frame.shape
             bytes_per_line = 3 * width
             # Копируем буфер, чтобы предотвратить обращение Qt к уже освобожденной памяти
