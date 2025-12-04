@@ -48,6 +48,7 @@ class ChannelView(QtWidgets.QWidget):
             "background-color: rgba(0, 0, 0, 0.55); color: #ddd; padding: 2px 4px;"
         )
         self.status_hint.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.status_hint.hide()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -67,8 +68,10 @@ class ChannelView(QtWidgets.QWidget):
         self.motion_indicator.setVisible(active)
 
     def set_status(self, text: str) -> None:
+        self.status_hint.setVisible(bool(text))
         self.status_hint.setText(text)
-        self.status_hint.adjustSize()
+        if text:
+            self.status_hint.adjustSize()
 
 
 class ROIEditor(QtWidgets.QLabel):
@@ -325,7 +328,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_status(self, channel: str, status: str) -> None:
         label = self.channel_labels.get(channel)
         if label:
-            label.set_status(status)
+            if "движение" in status.lower():
+                label.set_status("")
+            else:
+                label.set_status(status)
             label.set_motion_active("обнаружено" in status.lower())
 
     # ------------------ События ------------------
