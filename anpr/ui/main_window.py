@@ -467,41 +467,30 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(left_panel)
 
         form_container = QtWidgets.QVBoxLayout()
-        self.preview = ROIEditor()
-        self.preview.roi_changed.connect(self._on_roi_drawn)
-        form_container.addWidget(self.preview)
 
-        form_layout = QtWidgets.QFormLayout()
+        channel_box = QtWidgets.QGroupBox("Канал")
+        channel_form = QtWidgets.QFormLayout(channel_box)
         self.channel_name_input = QtWidgets.QLineEdit()
         self.channel_source_input = QtWidgets.QLineEdit()
-        form_layout.addRow("Название:", self.channel_name_input)
-        form_layout.addRow("Источник/RTSP:", self.channel_source_input)
+        channel_form.addRow("Название:", self.channel_name_input)
+        channel_form.addRow("Источник/RTSP:", self.channel_source_input)
 
-        self.best_shots_input = QtWidgets.QSpinBox()
-        self.best_shots_input.setRange(1, 50)
-        self.best_shots_input.setToolTip("Количество бестшотов, участвующих в консенсусе трека")
-        form_layout.addRow("Бестшоты на трек:", self.best_shots_input)
+        preview_layout = QtWidgets.QVBoxLayout()
+        self.preview = ROIEditor()
+        self.preview.roi_changed.connect(self._on_roi_drawn)
+        preview_layout.addWidget(self.preview)
+        refresh_btn = QtWidgets.QPushButton("Обновить кадр")
+        refresh_btn.clicked.connect(self._refresh_preview_frame)
+        preview_layout.addWidget(refresh_btn, alignment=QtCore.Qt.AlignRight)
+        channel_form.addRow(preview_layout)
+        form_container.addWidget(channel_box)
 
-        self.cooldown_input = QtWidgets.QSpinBox()
-        self.cooldown_input.setRange(0, 3600)
-        self.cooldown_input.setToolTip(
-            "Интервал (в секундах), в течение которого не создается повторное событие для того же номера"
-        )
-        form_layout.addRow("Пауза повтора (сек):", self.cooldown_input)
-
-        self.min_conf_input = QtWidgets.QDoubleSpinBox()
-        self.min_conf_input.setRange(0.0, 1.0)
-        self.min_conf_input.setSingleStep(0.05)
-        self.min_conf_input.setDecimals(2)
-        self.min_conf_input.setToolTip(
-            "Минимальная уверенность OCR (0-1) для приема результата; ниже — помечается как нечитаемое"
-        )
-        form_layout.addRow("Мин. уверенность OCR:", self.min_conf_input)
-
+        detection_box = QtWidgets.QGroupBox("Детектор движения и область")
+        detection_form = QtWidgets.QFormLayout(detection_box)
         self.detection_mode_input = QtWidgets.QComboBox()
         self.detection_mode_input.addItem("Постоянное", "continuous")
         self.detection_mode_input.addItem("Детектор движения", "motion")
-        form_layout.addRow("Обнаружение ТС:", self.detection_mode_input)
+        detection_form.addRow("Обнаружение ТС:", self.detection_mode_input)
 
         roi_layout = QtWidgets.QGridLayout()
         self.roi_x_input = QtWidgets.QSpinBox()
@@ -524,17 +513,72 @@ class MainWindow(QtWidgets.QMainWindow):
         roi_layout.addWidget(self.roi_w_input, 2, 1)
         roi_layout.addWidget(QtWidgets.QLabel("Высота (%):"), 3, 0)
         roi_layout.addWidget(self.roi_h_input, 3, 1)
-        form_layout.addRow("Область распознавания:", roi_layout)
+        detection_form.addRow("Область распознавания:", roi_layout)
 
-        refresh_btn = QtWidgets.QPushButton("Обновить кадр")
-        refresh_btn.clicked.connect(self._refresh_preview_frame)
-        form_layout.addRow(refresh_btn)
+        self.motion_threshold_input = QtWidgets.QDoubleSpinBox()
+        self.motion_threshold_input.setRange(0.000, 1.000)
+        self.motion_threshold_input.setSingleStep(0.001)
+        self.motion_threshold_input.setDecimals(3)
+        self.motion_threshold_input.setToolTip("Базовый порог движения для запуска распознавания")
+        detection_form.addRow("Порог движения:", self.motion_threshold_input)
+
+        self.motion_min_threshold_input = QtWidgets.QDoubleSpinBox()
+        self.motion_min_threshold_input.setRange(0.000, 1.000)
+        self.motion_min_threshold_input.setSingleStep(0.001)
+        self.motion_min_threshold_input.setDecimals(3)
+        self.motion_min_threshold_input.setToolTip("Минимальный нижний порог (шумовой порог)")
+        detection_form.addRow("Мин. порог (шум):", self.motion_min_threshold_input)
+
+        self.motion_scale_input = QtWidgets.QDoubleSpinBox()
+        self.motion_scale_input.setRange(0.1, 20.0)
+        self.motion_scale_input.setSingleStep(0.1)
+        self.motion_scale_input.setDecimals(2)
+        self.motion_scale_input.setToolTip("Насколько усиливать порог при всплесках движения")
+        detection_form.addRow("Адаптивный множитель:", self.motion_scale_input)
+
+        self.motion_hold_input = QtWidgets.QDoubleSpinBox()
+        self.motion_hold_input.setRange(0.0, 20.0)
+        self.motion_hold_input.setSingleStep(0.5)
+        self.motion_hold_input.setDecimals(1)
+        self.motion_hold_input.setToolTip("Держать движение активным после срабатывания (сек)")
+        detection_form.addRow("Окно удержания (сек):", self.motion_hold_input)
+
+        self.motion_noise_ema_input = QtWidgets.QDoubleSpinBox()
+        self.motion_noise_ema_input.setRange(0.0, 1.0)
+        self.motion_noise_ema_input.setSingleStep(0.05)
+        self.motion_noise_ema_input.setDecimals(2)
+        self.motion_noise_ema_input.setToolTip("EMA шумовой базы для адаптивного порога")
+        detection_form.addRow("Сглаживание шума EMA:", self.motion_noise_ema_input)
+        form_container.addWidget(detection_box)
+
+        recognition_box = QtWidgets.QGroupBox("Распознавание и трекинг")
+        recognition_form = QtWidgets.QFormLayout(recognition_box)
+        self.best_shots_input = QtWidgets.QSpinBox()
+        self.best_shots_input.setRange(1, 50)
+        self.best_shots_input.setToolTip("Количество бестшотов, участвующих в консенсусе трека")
+        recognition_form.addRow("Бестшоты на трек:", self.best_shots_input)
+
+        self.cooldown_input = QtWidgets.QSpinBox()
+        self.cooldown_input.setRange(0, 3600)
+        self.cooldown_input.setToolTip(
+            "Интервал (в секундах), в течение которого не создается повторное событие для того же номера"
+        )
+        recognition_form.addRow("Пауза повтора (сек):", self.cooldown_input)
+
+        self.min_conf_input = QtWidgets.QDoubleSpinBox()
+        self.min_conf_input.setRange(0.0, 1.0)
+        self.min_conf_input.setSingleStep(0.05)
+        self.min_conf_input.setDecimals(2)
+        self.min_conf_input.setToolTip(
+            "Минимальная уверенность OCR (0-1) для приема результата; ниже — помечается как нечитаемое"
+        )
+        recognition_form.addRow("Мин. уверенность OCR:", self.min_conf_input)
+        form_container.addWidget(recognition_box)
 
         save_btn = QtWidgets.QPushButton("Сохранить")
         save_btn.clicked.connect(self._save_channel)
-        form_layout.addRow(save_btn)
+        form_container.addWidget(save_btn, alignment=QtCore.Qt.AlignRight)
 
-        form_container.addLayout(form_layout)
         layout.addLayout(form_container)
 
         self._reload_channels_list()
@@ -561,6 +605,12 @@ class MainWindow(QtWidgets.QMainWindow):
             mode_index = max(0, self.detection_mode_input.findData(mode))
             self.detection_mode_input.setCurrentIndex(mode_index)
 
+            self.motion_threshold_input.setValue(float(channel.get("motion_threshold", 0.01)))
+            self.motion_min_threshold_input.setValue(float(channel.get("motion_min_threshold", 0.003)))
+            self.motion_scale_input.setValue(float(channel.get("motion_adaptive_scale", 3.0)))
+            self.motion_hold_input.setValue(float(channel.get("motion_hold_seconds", 2.5)))
+            self.motion_noise_ema_input.setValue(float(channel.get("motion_noise_ema", 0.1)))
+
             region = channel.get("region", {})
             self.roi_x_input.setValue(int(region.get("x", 0)))
             self.roi_y_input.setValue(int(region.get("y", 0)))
@@ -579,17 +629,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _add_channel(self) -> None:
         channels = self.settings.get_channels()
         new_id = max([c.get("id", 0) for c in channels] + [0]) + 1
+        defaults = SettingsManager._channel_defaults(self.settings.settings.get("tracking", {}))
         channels.append(
             {
                 "id": new_id,
                 "name": f"Канал {new_id}",
                 "source": "",
-                "best_shots": self.settings.get_best_shots(),
-                "cooldown_seconds": self.settings.get_cooldown_seconds(),
-                "ocr_min_confidence": self.settings.get_min_confidence(),
-                "region": {"x": 0, "y": 0, "width": 100, "height": 100},
-                "detection_mode": "continuous",
-                "motion_threshold": 0.01,
+                **defaults,
             }
         )
         self.settings.save_channels(channels)
@@ -615,6 +661,11 @@ class MainWindow(QtWidgets.QMainWindow):
             channels[index]["cooldown_seconds"] = int(self.cooldown_input.value())
             channels[index]["ocr_min_confidence"] = float(self.min_conf_input.value())
             channels[index]["detection_mode"] = self.detection_mode_input.currentData()
+            channels[index]["motion_threshold"] = float(self.motion_threshold_input.value())
+            channels[index]["motion_min_threshold"] = float(self.motion_min_threshold_input.value())
+            channels[index]["motion_adaptive_scale"] = float(self.motion_scale_input.value())
+            channels[index]["motion_hold_seconds"] = float(self.motion_hold_input.value())
+            channels[index]["motion_noise_ema"] = float(self.motion_noise_ema_input.value())
 
             region = {
                 "x": int(self.roi_x_input.value()),
