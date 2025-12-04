@@ -14,7 +14,21 @@ class SettingsManager:
         return {
             "grid": "2x2",
             "channels": [
-                {"id": 1, "name": "Канал 1", "source": "0"},
+                {
+                    "id": 1,
+                    "name": "Канал 1",
+                    "source": "0",
+                    "best_shots": 3,
+                    "cooldown_seconds": 5,
+                    "ocr_min_confidence": 0.6,
+                    "region": {"x": 0, "y": 0, "width": 100, "height": 100},
+                    "detection_mode": "continuous",
+                    "motion_threshold": 0.01,
+                    "motion_min_threshold": 0.003,
+                    "motion_adaptive_scale": 3.0,
+                    "motion_hold_seconds": 2.5,
+                    "motion_noise_ema": 0.1,
+                },
             ],
             "storage": {"events_db": "data/events.db"},
             "tracking": {
@@ -36,14 +50,61 @@ class SettingsManager:
             self._save(defaults)
             return defaults
         with open(self.path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return self._upgrade(json.load(f))
+
+    def _upgrade(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Обновляет существующие настройки, добавляя недостающие поля."""
+
+        changed = False
+        tracking_defaults = data.get("tracking", {})
+        for channel in data.get("channels", []):
+            if self._fill_channel_defaults(channel, tracking_defaults):
+                changed = True
+
+        if changed:
+            self._save(data)
+        return data
+
+    @staticmethod
+    def _channel_defaults(tracking_defaults: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "best_shots": int(tracking_defaults.get("best_shots", 3)),
+            "cooldown_seconds": int(tracking_defaults.get("cooldown_seconds", 5)),
+            "ocr_min_confidence": float(tracking_defaults.get("ocr_min_confidence", 0.6)),
+            "region": {"x": 0, "y": 0, "width": 100, "height": 100},
+            "detection_mode": "continuous",
+            "motion_threshold": 0.01,
+            "motion_min_threshold": 0.003,
+            "motion_adaptive_scale": 3.0,
+            "motion_hold_seconds": 2.5,
+            "motion_noise_ema": 0.1,
+        }
+
+    def _fill_channel_defaults(self, channel: Dict[str, Any], tracking_defaults: Dict[str, Any]) -> bool:
+        defaults = self._channel_defaults(tracking_defaults)
+        changed = False
+        for key, value in defaults.items():
+            if key not in channel:
+                # Сохраняем только отсутствующие ключи, не перезаписывая пользовательские значения.
+                channel[key] = value
+                changed = True
+        return changed
 
     def _save(self, data: Dict[str, Any]) -> None:
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def get_channels(self) -> List[Dict[str, Any]]:
-        return self.settings.get("channels", [])
+        channels = self.settings.get("channels", [])
+        tracking_defaults = self.settings.get("tracking", {})
+        changed = False
+        for channel in channels:
+            if self._fill_channel_defaults(channel, tracking_defaults):
+                changed = True
+
+        if changed:
+            self.save_channels(channels)
+        return channels
 
     def save_channels(self, channels: List[Dict[str, Any]]) -> None:
         self.settings["channels"] = channels

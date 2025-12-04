@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
@@ -19,22 +20,23 @@ class ChannelWorker(QtCore.QThread):
     event_ready = QtCore.pyqtSignal(dict)
     status_ready = QtCore.pyqtSignal(str, str)
 
-    def __init__(
-        self,
-        channel_conf: Dict,
-        db_path: str,
-        best_shots: int,
-        cooldown_seconds: int,
-        min_confidence: float,
-        parent=None,
-    ) -> None:
+    def __init__(self, channel_conf: Dict, db_path: str, parent=None) -> None:
         super().__init__(parent)
         self.channel_conf = channel_conf
         self.db_path = db_path
         self._running = True
-        self.best_shots = best_shots
-        self.cooldown_seconds = cooldown_seconds
-        self.min_confidence = min_confidence
+        self.best_shots = int(channel_conf.get("best_shots", 3))
+        self.cooldown_seconds = int(channel_conf.get("cooldown_seconds", 5))
+        self.min_confidence = float(channel_conf.get("ocr_min_confidence", 0.6))
+        self.detection_mode = channel_conf.get("detection_mode", "continuous")
+        self.motion_threshold = float(channel_conf.get("motion_threshold", 0.01))
+        self.motion_min_threshold = float(channel_conf.get("motion_min_threshold", 0.003))
+        self.motion_adaptive_scale = float(channel_conf.get("motion_adaptive_scale", 3.0))
+        self.motion_hold_seconds = float(channel_conf.get("motion_hold_seconds", 2.5))
+        self.motion_noise_ema = float(channel_conf.get("motion_noise_ema", 0.1))
+        self._prev_motion_frame: Optional[cv2.Mat] = None
+        self._noise_floor = 0.0
+        self._last_motion_ts: Optional[float] = None
 
     def _open_capture(self, source: str) -> Optional[cv2.VideoCapture]:
         capture = cv2.VideoCapture(int(source) if source.isnumeric() else source)
@@ -54,6 +56,68 @@ class ChannelWorker(QtCore.QThread):
             ),
             detector,
         )
+
+    def _region_rect(self, frame_shape: Tuple[int, int, int]) -> Tuple[int, int, int, int]:
+        height, width, _ = frame_shape
+        region = self.channel_conf.get("region", {})
+        x_pct = max(0, min(100, int(region.get("x", 0))))
+        y_pct = max(0, min(100, int(region.get("y", 0))))
+        w_pct = max(1, min(100, int(region.get("width", 100))))
+        h_pct = max(1, min(100, int(region.get("height", 100))))
+
+        x2_pct = min(100, x_pct + w_pct)
+        y2_pct = min(100, y_pct + h_pct)
+
+        x1 = int(width * x_pct / 100)
+        y1 = int(height * y_pct / 100)
+        x2 = max(x1 + 1, int(width * x2_pct / 100))
+        y2 = max(y1 + 1, int(height * y2_pct / 100))
+        return x1, y1, x2, y2
+
+    def _extract_region(self, frame: cv2.Mat) -> Tuple[cv2.Mat, Tuple[int, int, int, int]]:
+        x1, y1, x2, y2 = self._region_rect(frame.shape)
+        return frame[y1:y2, x1:x2], (x1, y1, x2, y2)
+
+    def _motion_detected(self, roi_frame: cv2.Mat) -> bool:
+        if self.detection_mode != "motion":
+            return True
+
+        if roi_frame.size == 0:
+            return False
+
+        gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        if self._prev_motion_frame is None:
+            self._prev_motion_frame = gray
+            return False
+
+        frame_delta = cv2.absdiff(self._prev_motion_frame, gray)
+        self._prev_motion_frame = gray
+
+        _, thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)
+        motion_ratio = cv2.countNonZero(thresh) / float(gray.size)
+
+        self._noise_floor = (1 - self.motion_noise_ema) * self._noise_floor + self.motion_noise_ema * motion_ratio
+        adaptive_threshold = max(
+            self.motion_min_threshold,
+            self.motion_threshold,
+            self._noise_floor * self.motion_adaptive_scale,
+        )
+        return motion_ratio > adaptive_threshold
+
+    @staticmethod
+    def _offset_detections(detections: list[dict], roi_rect: Tuple[int, int, int, int]) -> list[dict]:
+        x1, y1, _, _ = roi_rect
+        adjusted: list[dict] = []
+        for det in detections:
+            box = det.get("bbox")
+            if not box:
+                continue
+            det_copy = det.copy()
+            det_copy["bbox"] = [int(box[0] + x1), int(box[1] + y1), int(box[2] + x1), int(box[3] + y1)]
+            adjusted.append(det_copy)
+        return adjusted
 
     async def _process_events(
         self, storage: AsyncEventDatabase, source: str, results: list[dict], channel_name: str
@@ -103,6 +167,7 @@ class ChannelWorker(QtCore.QThread):
 
         channel_name = self.channel_conf.get("name", "Канал")
         logger.info("Канал %s запущен (источник=%s)", channel_name, source)
+        waiting_for_motion = False
         while self._running:
             ret, frame = await asyncio.to_thread(capture.read)
             if not ret:
@@ -110,9 +175,28 @@ class ChannelWorker(QtCore.QThread):
                 logger.warning("Поток остановлен для канала %s", channel_name)
                 break
 
-            detections = await asyncio.to_thread(detector.track, frame)
-            results = await asyncio.to_thread(pipeline.process_frame, frame, detections)
-            await self._process_events(storage, source, results, channel_name)
+            roi_frame, roi_rect = self._extract_region(frame)
+            motion_detected = self._motion_detected(roi_frame)
+            now_ts = time.monotonic()
+            if motion_detected:
+                self._last_motion_ts = now_ts
+
+            motion_active = motion_detected
+            if self.detection_mode == "motion" and not motion_active and self._last_motion_ts:
+                motion_active = (now_ts - self._last_motion_ts) < self.motion_hold_seconds
+
+            if not motion_active and self.detection_mode == "motion":
+                if not waiting_for_motion:
+                    self.status_ready.emit(channel_name, "Ожидание движения")
+                waiting_for_motion = True
+            else:
+                if waiting_for_motion and motion_active:
+                    self.status_ready.emit(channel_name, "Движение обнаружено")
+                waiting_for_motion = False
+                detections = await asyncio.to_thread(detector.track, roi_frame)
+                detections = self._offset_detections(detections, roi_rect)
+                results = await asyncio.to_thread(pipeline.process_frame, frame, detections)
+                await self._process_events(storage, source, results, channel_name)
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width, channel = rgb_frame.shape
